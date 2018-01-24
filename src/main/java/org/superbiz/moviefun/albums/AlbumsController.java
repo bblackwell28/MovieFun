@@ -1,22 +1,32 @@
 package org.superbiz.moviefun.albums;
 
+import com.amazonaws.auth.AWSCredentials;
+import com.amazonaws.services.s3.AmazonS3Client;
+import com.amazonaws.util.IOUtils;
 import org.apache.tika.Tika;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.annotation.Bean;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
+import org.springframework.stereotype.Component;
 import org.springframework.stereotype.Controller;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
+import org.superbiz.moviefun.util.Blob;
+import org.superbiz.moviefun.util.BlobStore;
+import org.superbiz.moviefun.util.FileStore;
+import org.superbiz.moviefun.util.S3Store;
 
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
+import java.io.OutputStream;
 import java.net.URISyntaxException;
 import java.nio.file.Path;
-import java.nio.file.Paths;
 import java.util.Map;
 
-import static java.lang.ClassLoader.getSystemResource;
 import static java.lang.String.format;
 import static java.nio.file.Files.readAllBytes;
 
@@ -26,10 +36,19 @@ public class AlbumsController {
 
     private final AlbumsBean albumsBean;
 
+    @Value("${s3.endpointUrl}") String s3EndpointUrl;
+    @Value("${s3.accessKey}") String s3AccessKey;
+    @Value("${s3.secretKey}") String s3SecretKey;
+    @Value("${s3.bucketName}") String s3BucketName;
+
     public AlbumsController(AlbumsBean albumsBean) {
         this.albumsBean = albumsBean;
     }
 
+    public BlobStore blobStore() {
+        return new S3Store(s3BucketName, s3AccessKey, s3SecretKey, s3EndpointUrl);
+//        return new FileStore();
+    }
 
     @GetMapping
     public String index(Map<String, Object> model) {
@@ -45,29 +64,33 @@ public class AlbumsController {
 
     @PostMapping("/{albumId}/cover")
     public String uploadCover(@PathVariable long albumId, @RequestParam("file") MultipartFile uploadedFile) throws IOException {
-        saveUploadToFile(uploadedFile, getCoverFile(albumId));
+        saveUploadToFile(uploadedFile, albumId);
 
-        return format("redirect:/albums/%d", albumId);
+        return format("redirect:/albums/%s", albumId);
     }
 
     @GetMapping("/{albumId}/cover")
     public HttpEntity<byte[]> getCover(@PathVariable long albumId) throws IOException, URISyntaxException {
-        Path coverFilePath = getExistingCoverPath(albumId);
-        byte[] imageBytes = readAllBytes(coverFilePath);
-        HttpHeaders headers = createImageHttpHeaders(coverFilePath, imageBytes);
+        Blob blob = getFile(albumId);
+        File targetFile;
+        HttpHeaders headers;
+        byte[] imageBytes;
+        if(blob == null) {
+            targetFile = new File("src/main/resources/default-cover.jpg");
+            imageBytes = readAllBytes(targetFile.toPath());;
+            headers = createImageHttpHeaders(targetFile.toPath(), imageBytes);
+        } else {
+            imageBytes = IOUtils.toByteArray(blob.inputStream);
+
+            headers = new HttpHeaders();
+            headers.setContentType(MediaType.parseMediaType(blob.contentType));
+            headers.setContentLength(imageBytes.length);
+
+            return new HttpEntity<>(imageBytes, headers);
+        }
 
         return new HttpEntity<>(imageBytes, headers);
-    }
 
-
-    private void saveUploadToFile(@RequestParam("file") MultipartFile uploadedFile, File targetFile) throws IOException {
-        targetFile.delete();
-        targetFile.getParentFile().mkdirs();
-        targetFile.createNewFile();
-
-        try (FileOutputStream outputStream = new FileOutputStream(targetFile)) {
-            outputStream.write(uploadedFile.getBytes());
-        }
     }
 
     private HttpHeaders createImageHttpHeaders(Path coverFilePath, byte[] imageBytes) throws IOException {
@@ -79,21 +102,16 @@ public class AlbumsController {
         return headers;
     }
 
-    private File getCoverFile(@PathVariable long albumId) {
-        String coverFileName = format("covers/%d", albumId);
-        return new File(coverFileName);
+    private void saveUploadToFile(@RequestParam("file") MultipartFile uploadedFile, long albumId) throws IOException {
+        BlobStore fileStore = blobStore();
+        fileStore.put(
+            new Blob(Long.toString(albumId), uploadedFile.getInputStream(), uploadedFile.getContentType())
+        );
     }
 
-    private Path getExistingCoverPath(@PathVariable long albumId) throws URISyntaxException {
-        File coverFile = getCoverFile(albumId);
-        Path coverFilePath;
-
-        if (coverFile.exists()) {
-            coverFilePath = coverFile.toPath();
-        } else {
-            coverFilePath = Paths.get(getSystemResource("default-cover.jpg").toURI());
-        }
-
-        return coverFilePath;
+    private Blob getFile(@PathVariable long albumId) throws IOException {
+        BlobStore fileStore = blobStore();
+        return fileStore.get(Long.toString(albumId)).orElse(null);
     }
+
 }
